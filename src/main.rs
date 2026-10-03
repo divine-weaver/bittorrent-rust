@@ -1,11 +1,7 @@
 use std::env;
 
-// Available if you need it!
-// use serde_bencode
-
 #[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
-    // If encoded_value starts with a digit, it's a string.
     if encoded_value.chars().next().unwrap().is_ascii_digit() {
         let colon_index = encoded_value.find(':').unwrap();
         let number_string = &encoded_value[..colon_index];
@@ -31,7 +27,27 @@ fn decode_bencoded_value(encoded_value: &str) -> (serde_json::Value, &str) {
         }
 
         let rest_after_e = &rest[1..];
+        
         (serde_json::Value::Array(values), rest_after_e)
+        
+    } else if encoded_value.chars().next().unwrap() == 'd' {
+        let mut rest = &encoded_value[1..];
+        let mut values = serde_json::Map::new();
+
+        while !rest.starts_with('e') {
+            let (key, after_key) = decode_bencoded_value(rest);
+
+            let (value, after_value) = decode_bencoded_value(after_key);
+            
+            let key = match key {
+                serde_json::Value::String(s) => s,
+                _ => panic!("Dictionary keys mus be strings")
+            };
+            values.insert(key, value);
+
+            rest = after_value;
+        }
+        (serde_json::Value::Object(values), &rest[1..])
     }
     else {
         panic!("Unhandled encoded value: {}", encoded_value)
