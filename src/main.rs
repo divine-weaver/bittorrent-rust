@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, net::Ipv4Addr};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use sha1::{Sha1, Digest};
@@ -69,7 +69,13 @@ fn main() -> anyhow::Result<()> {
             let body = res.bytes()?;
             let deserialized_res: TrackerResponse = serde_bencode::from_bytes(&body)?;
 
-            println!("Peers: {:?}", deserialized_res.peers);
+            for (i, address) in deserialized_res.peers.chunks_exact(6).enumerate() {
+                let ip = Ipv4Addr::new(address[0], address[1], address[2], address[3]);
+                let port = u16::from_be_bytes([address[4], address[5]]);
+
+                println!(" address {}: {}:{}", i + 1, ip, port);
+            }
+
         },
         _ =>  println!("unknown command: {}", args[1])
     }
