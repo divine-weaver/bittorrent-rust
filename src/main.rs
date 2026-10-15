@@ -1,4 +1,4 @@
-use std::{env, net::Ipv4Addr};
+use std::{env, net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream}, time::Duration};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use sha1::{Sha1, Digest};
@@ -69,11 +69,24 @@ fn main() -> anyhow::Result<()> {
             let body = res.bytes()?;
             let deserialized_res: TrackerResponse = serde_bencode::from_bytes(&body)?;
 
-            for (i, address) in deserialized_res.peers.chunks_exact(6).enumerate() {
+            let mut valid_peers: Vec<SocketAddr> = Vec::new();
+
+            for address in deserialized_res.peers.chunks_exact(6) {
                 let ip = Ipv4Addr::new(address[0], address[1], address[2], address[3]);
                 let port = u16::from_be_bytes([address[4], address[5]]);
+                let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
 
-                println!(" address {}: {}:{}", i + 1, ip, port);
+                match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+                    Ok(_stream) => {
+                        println!("address {} reachable", addr);
+                        valid_peers.push(addr);
+                    },
+                    Err(_) => {
+                        eprintln!("address {} failed", addr);
+                    }
+                
+                }
+                
             }
 
         },
