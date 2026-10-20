@@ -1,4 +1,4 @@
-use std::{env, net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream}, time::Duration};
+use std::{env, io::{Read, Write}, net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream}, time::Duration};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use sha1::{Sha1, Digest};
@@ -26,14 +26,15 @@ struct TrackerResponse {
     peers: Vec<u8>
 }
 
-fn parse_torrent(arg: Vec<String>) -> anyhow::Result<(Torrent, String)> {
+fn parse_torrent(arg: Vec<String>) -> anyhow::Result<(Torrent, Vec<u8>, String)> {
     let contents = fs::read(&arg[2])?;
     let deserialized: Torrent = serde_bencode::from_bytes(&contents)?;
     let re_encoded = serde_bencode::to_bytes(&deserialized.info)?;
     let hash = Sha1::digest(&re_encoded);
+    let info_hash_bytes = hash.to_vec();
     let info_hash: String = hex::encode(hash);
 
-    Ok((deserialized, info_hash))
+    Ok((deserialized, info_hash_bytes, info_hash))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -50,13 +51,13 @@ fn main() -> anyhow::Result<()> {
         },
         "info" => {
 
-            let (deserialized, info_hash) = parse_torrent(args)?;            
+            let (deserialized, _info_hash_bytes, info_hash) = parse_torrent(args)?;            
             println!("Here is Tracker URL: {}", deserialized.announce);
             println!("Here is the length: {}", deserialized.info.length);
             println!("Here is the info hash: {}", info_hash);
         },
         "peers" => {
-            let (deserialized, _info_hash) = parse_torrent(args)?;            
+            let (deserialized, info_hash_bytes, _info_hash) = parse_torrent(args)?;            
             let query = "peer_id=00112233445566778899&port=6881&uploaded=0&downloaded=0&left=92063&compact=1";
             let req = format!(
                 "{}?info_hash={}&{}", 
@@ -77,9 +78,52 @@ fn main() -> anyhow::Result<()> {
                 let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
 
                 match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
-                    Ok(_stream) => {
-                        println!("address {} reachable", addr);
-                        valid_peers.push(addr);
+                    Ok(mut stream) => {
+                        let mut handshake = Vec::new();
+                        handshake.push(19u8);
+                        handshake.extend_from_slice(b"BitTorrent protocol");
+                        handshake.extend_from_slice(&[0u8; 8]);
+                        handshake.extend_from_slice(&info_hash_bytes);
+                        handshake.extend_from_slice(b"00112233445566778899");
+                        
+                        if let Err(e) = stream.write_all(&handshake) {
+                            eprintln!("{}: write failed: {}", addr, e);
+                            continue;
+                        }
+                        
+                         let mut buf = [0u8; 68];
+
+                         if let Err(e) = stream.read_exact(&mut buf) {
+                             eprintln!("{}: read failed: {}", addr, e);
+                             continue;
+                         }
+
+                         let pstrlen = buf[0];                // offset byte, should be 19.
+                         let pstr = &buf[1..20];              //  "BitTorrent protocol" banner       
+                         let reply_info_hash = &buf[28..48];          
+                         let reply_peer_id = &buf[48..68];    // peer's own id 
+
+                         if  pstrlen != 19 {
+                             eprintln!("{}: bad ptrstr: {}", addr, pstrlen);
+                             continue;
+                         }
+
+                         if pstr != b"BitTorrent protocol" {
+                            eprintln!("{}: bad protocol string", addr);
+                            continue;
+                         }
+
+                         if reply_info_hash != info_hash_bytes.as_slice() {  // same info_hash should be echoed back.
+                               eprintln!("{}: info_hash mismatch", addr);
+                                 continue;
+                             }
+                         if reply_peer_id == b"00112233445566778899" {
+                             eprintln!("{}: peer is ourselves", addr);
+                             continue;
+                            }
+                         
+                            println!("{} peer id: {}", addr, hex::encode(reply_peer_id));
+                            valid_peers.push(addr); 
                     },
                     Err(_) => {
                         eprintln!("address {} failed", addr);
