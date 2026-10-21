@@ -1,4 +1,5 @@
 use std::{env, io::{Read, Write}, net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpStream}, time::Duration};
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use sha1::{Sha1, Digest};
@@ -35,6 +36,50 @@ fn parse_torrent(arg: Vec<String>) -> anyhow::Result<(Torrent, Vec<u8>, String)>
     let info_hash: String = hex::encode(hash);
 
     Ok((deserialized, info_hash_bytes, info_hash))
+}
+
+fn peer_connect(addr: SocketAddr, info_hash_bytes: &[u8]) -> anyhow::Result<(TcpStream, [u8; 20])> {
+            let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
+            let mut handshake = Vec::new();
+            handshake.push(19u8);
+            handshake.extend_from_slice(b"BitTorrent protocol");
+            handshake.extend_from_slice(&[0u8; 8]);
+            handshake.extend_from_slice(&info_hash_bytes);
+            handshake.extend_from_slice(b"00112233445566778899");
+            
+            stream.write_all(&handshake)?;
+            
+             let mut buf = [0u8; 68];
+
+             stream.read_exact(&mut buf)?;
+
+             let pstrlen = buf[0];                // offset byte, should be 19.
+             let pstr = &buf[1..20];              //  "BitTorrent protocol" banner       
+             let reply_info_hash = &buf[28..48];          
+             let reply_peer_id = &buf[48..68];    // peer's own id 
+
+             if  pstrlen != 19 {
+                 eprintln!("{}: bad ptrstr: {}", addr, pstrlen);
+                 bail!("{}, bad protocol string", addr);
+             }
+
+             if pstr != b"BitTorrent protocol" {
+                eprintln!("{}: bad protocol string", addr);
+                bail!("{}, bad protocol string", addr);
+             }
+
+             if reply_info_hash != info_hash_bytes {  // same info_hash should be echoed back.
+                   eprintln!("{}: info_hash mismatch", addr);
+                   bail!("{}, bad protocol string", addr);
+                 }
+             if reply_peer_id == b"00112233445566778899" {
+                 eprintln!("{}: peer is ourselves", addr);
+                 bail!("{}, bad protocol string", addr);
+                }
+
+            let peer_id: [u8; 20] = reply_peer_id.try_into()?;
+             
+                Ok((stream, peer_id))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,58 +122,14 @@ fn main() -> anyhow::Result<()> {
                 let port = u16::from_be_bytes([address[4], address[5]]);
                 let addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
 
-                match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
-                    Ok(mut stream) => {
-                        let mut handshake = Vec::new();
-                        handshake.push(19u8);
-                        handshake.extend_from_slice(b"BitTorrent protocol");
-                        handshake.extend_from_slice(&[0u8; 8]);
-                        handshake.extend_from_slice(&info_hash_bytes);
-                        handshake.extend_from_slice(b"00112233445566778899");
-                        
-                        if let Err(e) = stream.write_all(&handshake) {
-                            eprintln!("{}: write failed: {}", addr, e);
-                            continue;
-                        }
-                        
-                         let mut buf = [0u8; 68];
-
-                         if let Err(e) = stream.read_exact(&mut buf) {
-                             eprintln!("{}: read failed: {}", addr, e);
-                             continue;
-                         }
-
-                         let pstrlen = buf[0];                // offset byte, should be 19.
-                         let pstr = &buf[1..20];              //  "BitTorrent protocol" banner       
-                         let reply_info_hash = &buf[28..48];          
-                         let reply_peer_id = &buf[48..68];    // peer's own id 
-
-                         if  pstrlen != 19 {
-                             eprintln!("{}: bad ptrstr: {}", addr, pstrlen);
-                             continue;
-                         }
-
-                         if pstr != b"BitTorrent protocol" {
-                            eprintln!("{}: bad protocol string", addr);
-                            continue;
-                         }
-
-                         if reply_info_hash != info_hash_bytes.as_slice() {  // same info_hash should be echoed back.
-                               eprintln!("{}: info_hash mismatch", addr);
-                                 continue;
-                             }
-                         if reply_peer_id == b"00112233445566778899" {
-                             eprintln!("{}: peer is ourselves", addr);
-                             continue;
-                            }
-                         
-                            println!("{} peer id: {}", addr, hex::encode(reply_peer_id));
-                            valid_peers.push(addr); 
+                match peer_connect(addr, &info_hash_bytes) {
+                    Ok((_stream, peer_id)) => {
+                        println!("Success: {} peer id: {}", addr, hex::encode(peer_id));
+                        valid_peers.push(addr);
                     },
-                    Err(_) => {
-                        eprintln!("address {} failed", addr);
+                    Err(e) => {
+                        eprintln!("Error: {} Failed to connect to peer: {}",e, addr);
                     }
-                
                 }
                 
             }
